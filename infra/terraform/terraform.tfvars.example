@@ -1,0 +1,8 @@
+aws_region    = "us-east-1"
+project_name  = "cloud-lab"
+container_image = "123456789012.dkr.ecr.us-east-1.amazonaws.com/cloud-lab:latest"
+
+# Optional overrides
+# vpc_cidr            = "10.10.0.0/16"
+# public_subnet_cidrs = ["10.10.1.0/24", "10.10.2.0/24"]
+# desired_count       = 2
