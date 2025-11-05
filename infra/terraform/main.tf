@@ -9,7 +9,11 @@ locals {
   }
 }
 
-resource "aws_vpc" "app" {
+data "aws_availability_zones" "available" {
+  state = "available"
+}
+
+resource "aws_vpc" "tests" {
   cidr_block           = var.vpc_cidr
   enable_dns_hostnames = true
   enable_dns_support   = true
@@ -19,8 +23,8 @@ resource "aws_vpc" "app" {
   })
 }
 
-resource "aws_internet_gateway" "app" {
-  vpc_id = aws_vpc.app.id
+resource "aws_internet_gateway" "tests" {
+  vpc_id = aws_vpc.tests.id
 
   tags = merge(local.tags, {
     Name = "${var.project_name}-igw"
@@ -29,7 +33,7 @@ resource "aws_internet_gateway" "app" {
 
 resource "aws_subnet" "public" {
   count                   = length(var.public_subnet_cidrs)
-  vpc_id                  = aws_vpc.app.id
+  vpc_id                  = aws_vpc.tests.id
   cidr_block              = var.public_subnet_cidrs[count.index]
   map_public_ip_on_launch = true
   availability_zone       = data.aws_availability_zones.available.names[count.index]
@@ -40,12 +44,8 @@ resource "aws_subnet" "public" {
   })
 }
 
-data "aws_availability_zones" "available" {
-  state = "available"
-}
-
 resource "aws_route_table" "public" {
-  vpc_id = aws_vpc.app.id
+  vpc_id = aws_vpc.tests.id
 
   tags = merge(local.tags, {
     Name = "${var.project_name}-public"
@@ -55,7 +55,7 @@ resource "aws_route_table" "public" {
 resource "aws_route" "internet_access" {
   route_table_id         = aws_route_table.public.id
   destination_cidr_block = "0.0.0.0/0"
-  gateway_id             = aws_internet_gateway.app.id
+  gateway_id             = aws_internet_gateway.tests.id
 }
 
 resource "aws_route_table_association" "public" {
@@ -64,17 +64,10 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
-resource "aws_security_group" "alb" {
-  name        = "${var.project_name}-alb"
-  description = "Allow inbound HTTP access"
-  vpc_id      = aws_vpc.app.id
-
-  ingress {
-    protocol    = "tcp"
-    from_port   = 80
-    to_port     = 80
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+resource "aws_security_group" "tasks" {
+  name        = "${var.project_name}-tasks"
+  description = "Allow outbound traffic for test tasks"
+  vpc_id      = aws_vpc.tests.id
 
   egress {
     from_port   = 0
@@ -84,86 +77,18 @@ resource "aws_security_group" "alb" {
   }
 
   tags = merge(local.tags, {
-    Name = "${var.project_name}-alb"
+    Name = "${var.project_name}-tasks"
   })
 }
 
-resource "aws_security_group" "service" {
-  name        = "${var.project_name}-service"
-  description = "Allow traffic from the load balancer"
-  vpc_id      = aws_vpc.app.id
-
-  ingress {
-    description     = "Traffic from ALB"
-    from_port       = var.container_port
-    to_port         = var.container_port
-    protocol        = "tcp"
-    security_groups = [aws_security_group.alb.id]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = merge(local.tags, {
-    Name = "${var.project_name}-service"
-  })
-}
-
-resource "aws_lb" "app" {
-  name               = "${var.project_name}-alb"
-  internal           = false
-  load_balancer_type = "application"
-  security_groups    = [aws_security_group.alb.id]
-  subnets            = aws_subnet.public[*].id
-
-  tags = merge(local.tags, {
-    Name = "${var.project_name}-alb"
-  })
-}
-
-resource "aws_lb_target_group" "app" {
-  name        = "${var.project_name}-tg"
-  port        = var.container_port
-  protocol    = "HTTP"
-  target_type = "ip"
-  vpc_id      = aws_vpc.app.id
-
-  health_check {
-    matcher             = "200-399"
-    path                = "/"
-    interval            = 30
-    healthy_threshold   = 3
-    unhealthy_threshold = 2
-  }
-
-  tags = merge(local.tags, {
-    Name = "${var.project_name}-tg"
-  })
-}
-
-resource "aws_lb_listener" "http" {
-  load_balancer_arn = aws_lb.app.arn
-  port              = 80
-  protocol          = "HTTP"
-
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.app.arn
-  }
-}
-
-resource "aws_cloudwatch_log_group" "app" {
+resource "aws_cloudwatch_log_group" "tests" {
   name              = "/ecs/${var.project_name}"
   retention_in_days = 30
 
   tags = local.tags
 }
 
-resource "aws_ecr_repository" "app" {
+resource "aws_ecr_repository" "tests" {
   name                 = var.project_name
   image_tag_mutability = "MUTABLE"
 
@@ -221,11 +146,14 @@ data "aws_iam_policy_document" "cicd" {
   statement {
     actions = [
       "ecs:DescribeClusters",
-      "ecs:DescribeServices",
+      "ecs:DescribeTasks",
       "ecs:DescribeTaskDefinition",
       "ecs:ListClusters",
       "ecs:ListServices",
+      "ecs:ListTaskDefinitions",
       "ecs:RegisterTaskDefinition",
+      "ecs:RunTask",
+      "ecs:StopTask",
       "ecs:UpdateService"
     ]
     resources = ["*"]
@@ -255,7 +183,12 @@ data "aws_iam_policy_document" "cicd" {
       "ecr:PutImage",
       "ecr:UploadLayerPart"
     ]
-    resources = [aws_ecr_repository.app.arn]
+    resources = [aws_ecr_repository.tests.arn]
+  }
+
+  statement {
+    actions   = ["logs:GetLogEvents"]
+    resources = ["*"]
   }
 }
 
@@ -271,7 +204,7 @@ resource "aws_iam_user_policy" "cicd" {
   policy = data.aws_iam_policy_document.cicd.json
 }
 
-resource "aws_ecs_cluster" "app" {
+resource "aws_ecs_cluster" "tests" {
   name = "${var.project_name}-cluster"
 
   setting {
@@ -288,29 +221,22 @@ locals {
       name      = var.project_name
       image     = var.container_image
       essential = true
-      portMappings = [
-        {
-          containerPort = var.container_port
-          hostPort      = var.container_port
-          protocol      = "tcp"
-        }
-      ]
+      command   = var.container_command
+      cpu       = var.container_cpu
+      memory    = var.container_memory
       logConfiguration = {
         logDriver = "awslogs"
         options = {
-          awslogs-group         = aws_cloudwatch_log_group.app.name
+          awslogs-group         = aws_cloudwatch_log_group.tests.name
           awslogs-region        = var.aws_region
           awslogs-stream-prefix = var.project_name
         }
       }
-      cpu    = var.container_cpu
-      memory = var.container_memory
-      environment = []
     }
   ])
 }
 
-resource "aws_ecs_task_definition" "app" {
+resource "aws_ecs_task_definition" "tests" {
   family                   = var.task_family
   cpu                      = var.task_cpu
   memory                   = var.task_memory
@@ -321,57 +247,44 @@ resource "aws_ecs_task_definition" "app" {
   container_definitions    = local.container_definitions
 }
 
-resource "aws_ecs_service" "app" {
-  name            = "${var.project_name}-service"
-  cluster         = aws_ecs_cluster.app.id
-  task_definition = aws_ecs_task_definition.app.arn
-  desired_count   = var.desired_count
-  launch_type     = "FARGATE"
-
-  network_configuration {
-    subnets         = aws_subnet.public[*].id
-    security_groups = [aws_security_group.service.id]
-    assign_public_ip = true
-  }
-
-  load_balancer {
-    target_group_arn = aws_lb_target_group.app.arn
-    container_name   = var.project_name
-    container_port   = var.container_port
-  }
-
-  depends_on = [aws_lb_listener.http]
-
-  lifecycle {
-    ignore_changes = [task_definition]
-  }
-
-  tags = local.tags
-}
-
 output "cluster_name" {
-  value       = aws_ecs_cluster.app.name
-  description = "Name of the ECS cluster."
+  value       = aws_ecs_cluster.tests.name
+  description = "Name of the ECS cluster used for test workloads."
 }
 
-output "service_name" {
-  value       = aws_ecs_service.app.name
-  description = "Name of the ECS service."
+output "task_definition_arn" {
+  value       = aws_ecs_task_definition.tests.arn
+  description = "ARN of the ECS task definition registered for tests."
 }
 
 output "task_family" {
-  value       = aws_ecs_task_definition.app.family
+  value       = aws_ecs_task_definition.tests.family
   description = "Task definition family to update during deployments."
 }
 
-output "ecr_repository_url" {
-  value       = aws_ecr_repository.app.repository_url
-  description = "URL of the ECR repository used for container images."
+output "task_execution_role_arn" {
+  value       = aws_iam_role.ecs_task_execution.arn
+  description = "Execution role ARN passed to ECS tasks."
 }
 
-output "load_balancer_dns" {
-  value       = aws_lb.app.dns_name
-  description = "Public DNS name of the application load balancer."
+output "task_role_arn" {
+  value       = aws_iam_role.ecs_task.arn
+  description = "Task role ARN used by ECS tasks."
+}
+
+output "ecr_repository_url" {
+  value       = aws_ecr_repository.tests.repository_url
+  description = "URL of the ECR repository used for test container images."
+}
+
+output "public_subnet_ids" {
+  value       = aws_subnet.public[*].id
+  description = "Public subnet IDs for ECS task networking."
+}
+
+output "task_security_group_id" {
+  value       = aws_security_group.tasks.id
+  description = "Security group applied to ECS tasks."
 }
 
 output "ci_user_name" {

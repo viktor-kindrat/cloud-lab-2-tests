@@ -1,0 +1,54 @@
+name: Run ECS Load Tests
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  ecs-tests:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+      ECS_CLUSTER: ${{ secrets.ECS_CLUSTER }}
+      ECS_TASK_FAMILY: ${{ secrets.ECS_TASK_FAMILY }}
+      ECS_SUBNETS: ${{ secrets.ECS_SUBNETS }}
+      ECS_SECURITY_GROUPS: ${{ secrets.ECS_SECURITY_GROUPS }}
+      ECS_CONTAINER_NAME: ${{ secrets.ECS_CONTAINER_NAME }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        id: build-image
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          IMAGE_URI="$REGISTRY/${{ env.ECR_REPOSITORY }}:${GITHUB_SHA::7}"
+          docker build -t "$IMAGE_URI" .
+          docker push "$IMAGE_URI"
+          echo "image_uri=$IMAGE_URI" >> "$GITHUB_OUTPUT"
+
+      - name: Run ECS task
+        env:
+          TASK_FAMILY: ${{ env.ECS_TASK_FAMILY }}
+          CONTAINER_NAME: ${{ env.ECS_CONTAINER_NAME }}
+          IMAGE_URI: ${{ steps.build-image.outputs.image_uri }}
+          ECS_CLUSTER: ${{ env.ECS_CLUSTER }}
+          ECS_SUBNETS: ${{ env.ECS_SUBNETS }}
+          ECS_SECURITY_GROUPS: ${{ env.ECS_SECURITY_GROUPS }}
+        run: |
+          ./scripts/run-ecs-task.sh
