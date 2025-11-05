@@ -9,7 +9,7 @@ variable "project_name" {
 }
 
 variable "vpc_cidr" {
-  description = "CIDR block for the application VPC."
+  description = "CIDR block for the VPC used by ECS tasks."
   type        = string
   default     = "10.10.0.0/16"
 }
@@ -24,20 +24,23 @@ variable "public_subnet_cidrs" {
 }
 
 variable "container_image" {
-  description = "Initial container image to deploy in the ECS task."
+  description = "Initial container image to register in the ECS task definition."
   type        = string
 }
 
-variable "container_port" {
-  description = "Container port exposed by the application."
-  type        = number
-  default     = 5000
+variable "container_command" {
+  description = "Command executed by the container when the ECS task starts."
+  type        = list(string)
+  default     = [
+    "python",
+    "main.py"
+  ]
 }
 
 variable "task_family" {
   description = "ECS task definition family name."
   type        = string
-  default     = "cloud-lab-app"
+  default     = "cloud-lab-tests"
 }
 
 variable "task_cpu" {
@@ -62,10 +65,4 @@ variable "container_memory" {
   description = "Memory (in MiB) reserved for the container."
   type        = number
   default     = 512
-}
-
-variable "desired_count" {
-  description = "Number of tasks desired in the ECS service."
-  type        = number
-  default     = 1
 }
