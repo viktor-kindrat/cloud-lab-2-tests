@@ -1,15 +1,18 @@
-# Automated Fargate Deployment Pipeline
+# ECS Fargate Load Test Runner
 
-This repository now contains Terraform configuration for provisioning an AWS Fargate environment and a GitHub Actions workflow to build, publish, and deploy the application.
+This repository provisions the AWS infrastructure required to execute the load tests on-demand in AWS Fargate and wires
+it up to a reusable GitHub Actions workflow. Each workflow run builds the tester image, launches a one-off ECS task,
+streams the CloudWatch logs, and fails the workflow if the task exits non-zero.
 
-## 1. Provision infrastructure with Terraform
+## 1. Provision the infrastructure with Terraform
 
 1. Install [Terraform](https://developer.hashicorp.com/terraform/downloads).
-2. Copy `infra/terraform/terraform.tfvars.example` to `infra/terraform/terraform.tfvars` and update the values:
-   - `aws_region`: AWS region to deploy to.
-   - `project_name`: Short, unique name used when naming resources.
-   - `container_image`: The initial image to deploy (the GitHub Actions workflow will overwrite this on subsequent deployments).
-3. Initialise and apply the Terraform plan:
+2. Copy `infra/terraform/terraform.tfvars.example` to `infra/terraform/terraform.tfvars` and supply values for:
+    - `aws_region`: Region that should host the temporary test infrastructure.
+    - `project_name`: Short, unique name used as a prefix for all resources.
+    - `container_image`: Seed image to register in the initial task definition (the workflow swaps this on every run).
+    - Optionally adjust CPU/memory or command values if your tests require different defaults.
+3. Apply the configuration:
 
    ```bash
    cd infra/terraform
@@ -17,59 +20,71 @@ This repository now contains Terraform configuration for provisioning an AWS Far
    terraform apply
    ```
 
-   Terraform provisions the following:
+Terraform creates:
 
-   - VPC, public subnets, security groups, and an internet-facing Application Load Balancer.
-   - Amazon ECS cluster, task definition, service, CloudWatch log group, and Amazon ECR repository.
-   - IAM roles for the ECS task and execution, plus a CI/CD IAM user with the least privileges required to deploy.
+- A VPC with two public subnets, routing, and a security group that allows the Fargate tasks outbound internet access.
+- An Amazon ECR repository where the tester image is published.
+- An ECS cluster and task definition tailored for Fargate, including CloudWatch logging configuration.
+- IAM roles for the task execution and runtime permissions.
+- A `${project_name}-github` IAM user that the CI pipeline uses to build images and launch tasks.
 
-4. Capture the outputs displayed after a successful apply. They are required to configure the CI pipeline:
-   - `cluster_name`
-   - `service_name`
-   - `task_family`
-   - `ecr_repository_url`
-   - `ci_user_name`
-   - `load_balancer_dns`
+After `terraform apply` completes, capture the outputs—they feed into the workflow configuration:
 
-5. Create an access key for the `${project_name}-github` IAM user via the AWS Console or CLI. The access key ID and secret access key must be stored as GitHub Secrets (see below). The secret access key is only shown once—store it securely.
+| Output name              | Purpose                                           |
+|--------------------------|---------------------------------------------------|
+| `cluster_name`           | Cluster where tasks are launched.                 |
+| `task_definition_arn`    | Initial task definition revision (informational). |
+| `task_family`            | Family name that the workflow updates each run.   |
+| `ecr_repository_url`     | Full URI for the tester image repository.         |
+| `public_subnet_ids`      | Comma-separated subnet IDs for the task network.  |
+| `task_security_group_id` | Security group applied to test tasks.             |
+| `ci_user_name`           | Name of the IAM user created for CI access.       |
 
-## 2. Configure GitHub Secrets
+Generate an access key for the `${project_name}-github` user via the AWS Console or CLI—you will only see the secret key
+once, so store it securely.
 
-Add the following secrets to the repository (Settings → Secrets and variables → Actions):
+## 2. Configure GitHub Actions secrets
 
-| Secret Name            | Value                                                                 |
-| ---------------------- | --------------------------------------------------------------------- |
-| `AWS_ACCESS_KEY_ID`    | Access key ID for the `${project_name}-github` IAM user.              |
-| `AWS_SECRET_ACCESS_KEY`| Secret access key for the IAM user.                                   |
-| `AWS_REGION`           | Same region used in Terraform (`aws_region`).                         |
-| `ECR_REPOSITORY`       | Repository name (last segment of `ecr_repository_url`).               |
-| `ECS_CLUSTER_NAME`     | Value from the Terraform `cluster_name` output.                       |
-| `ECS_SERVICE_NAME`     | Value from the Terraform `service_name` output.                       |
-| `ECS_TASK_FAMILY`      | Value from the Terraform `task_family` output.                        |
+Add the following repository secrets (Settings → Secrets and variables → Actions):
 
-The GitHub Actions workflow uses OIDC-capable tooling, but access keys are required for the IAM user because Terraform provisions the user rather than a role in the GitHub account.
+| Secret name             | Value                                                                   |
+|-------------------------|-------------------------------------------------------------------------|
+| `AWS_ACCESS_KEY_ID`     | Access key ID for the `${project_name}-github` IAM user.                |
+| `AWS_SECRET_ACCESS_KEY` | Secret key for the IAM user.                                            |
+| `AWS_REGION`            | Same value as `aws_region` in Terraform.                                |
+| `ECR_REPOSITORY`        | Repository name (last segment of `ecr_repository_url`).                 |
+| `ECS_CLUSTER`           | Value from the `cluster_name` output.                                   |
+| `ECS_TASK_FAMILY`       | Value from the `task_family` output.                                    |
+| `ECS_SUBNETS`           | Comma-separated list of IDs from `public_subnet_ids`.                   |
+| `ECS_SECURITY_GROUPS`   | The ID from `task_security_group_id`.                                   |
+| `ECS_CONTAINER_NAME`    | Container name inside the task definition (defaults to `project_name`). |
 
-## 3. Deployment workflow
+The workflow defined in `.github/workflows/ecs-tests.yml` expects these secrets and environment variables. It uses
+static credentials because Terraform provisions an IAM user rather than an assumable GitHub OIDC role.
 
-The workflow defined in `.github/workflows/deploy.yml` runs on every push to the `main` branch and can be triggered manually. It performs the following steps:
+## 3. How the GitHub Actions workflow runs tests
 
-1. Checks out the repository.
-2. Configures AWS credentials from secrets.
-3. Logs in to the Amazon ECR registry created by Terraform.
-4. Builds the Docker image using the repository's `Dockerfile` and tags it with the current commit SHA.
+The **Run ECS Load Tests** workflow triggers on pushes to `main` or via the `workflow_dispatch` button. It performs the
+following steps:
+
+1. Checks out the repository code.
+2. Configures AWS credentials from the repository secrets.
+3. Authenticates to the ECR registry emitted by Terraform.
+4. Builds the tester Docker image from the repository and tags it with the short commit SHA.
 5. Pushes the image to ECR.
-6. Retrieves the latest ECS task definition revision, swaps the container image for the freshly built one, and registers a new revision.
-7. Updates the ECS service to use the new task definition and waits for the deployment to stabilise.
+6. Invokes `scripts/run-ecs-task.sh`, which:
+    - Registers a new task definition revision with the freshly built image.
+    - Starts a Fargate task in the provided subnets and security group.
+    - Waits for the task to finish, streams CloudWatch Logs, and returns the container exit code.
 
-Once the workflow completes, the application becomes available through the load balancer DNS name output by Terraform.
+If the ECS task exits non-zero, the workflow fails—use this to gate merges or release workflows on successful load-test
+execution.
 
-Health checks:
-- The Application Load Balancer is configured to probe path "/" and treat 200-399 as healthy.
-- The application exposes health endpoints at "/", "/health", and "/healthz" which return HTTP 200 with JSON {"status":"ok"}.
-- The Docker image defines a HEALTHCHECK that probes http://localhost:${APP_PORT:-8080}/health (falls back to 5000). This makes the container health visible to ECS when container health checks are enabled.
+## 4. Monitoring and maintenance
 
-## 4. Ongoing maintenance
-
-- Re-run `terraform apply` whenever you need to modify infrastructure-level settings (for example CPU/memory, scaling, networking, or environment variables). Application-level changes should be handled by GitHub Actions deployments.
-- Rotate the CI/CD user's access keys regularly and update the corresponding GitHub Secrets.
-- Monitor the ECS service, load balancer, and CloudWatch logs to ensure successful deployments.
+- Review CloudWatch Logs streamed in the workflow output or directly in the AWS console for deeper debugging.
+- Tune CPU, memory, and command defaults in `infra/terraform/variables.tf` and re-run `terraform apply` when resource
+  requirements change.
+- Rotate the CI user credentials regularly and update the corresponding GitHub Secrets.
+- Clean up infrastructure when it is no longer needed by running `terraform destroy` from the `infra/terraform`
+  directory.
