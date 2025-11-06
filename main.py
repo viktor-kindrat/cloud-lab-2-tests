@@ -3,11 +3,11 @@ import threading
 import time
 import random
 
-BASE_URL = "http://alb-db-labs-1688413274.eu-north-1.elb.amazonaws.com"
-ENDPOINTS = ["/health", "/docs", "/animators", "/agencies", "/events"]
-CONCURRENCY = 8
-DURATION = 300
-TIMEOUT = 20
+BASE_URL = "http://cloud-lab-alb-343957439.eu-central-1.elb.amazonaws.com/"
+ENDPOINTS = ["/health", "/docs", "/labels", "/albums", "/genres"]
+CONCURRENCY = 150
+DURATION = 1000
+TIMEOUT = 15
 
 stop_flag = False
 lock = threading.Lock()
